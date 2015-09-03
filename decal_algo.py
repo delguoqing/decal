@@ -53,13 +53,21 @@ def calc_seg_intersect(xa, ya, xb, yb, xc, yc, xd, yd):
 		return res_x, res_y, between(res_x, res_y, xa, ya, xb, yb), i, (c_cda == 1), (c_abc == 1)
 	return None, None, None, None, (c_cda == 1), (c_abc == 1)
 
+# 先根据三角形面积求重心坐标，然后插值得到z
+def calc_z_in_tri(x, y, pa, pb, pc):
+	s_abd = cross(pb[0] - pa[0], pb[1] - pa[1], x - pa[0], y - pa[1])
+	s_adc = cross(x - pa[0], y - pa[1], pc[0] - pa[0], pc[1] - pa[1])
+	s_bcd = cross(pc[0] - pb[0], pc[1] - pb[1], x - pb[0], y - pb[1])
+	z = (s_bcd * pa[2] + s_adc * pb[2] + s_abd * pc[2]) / (s_abd + s_adc + s_bcd)
+	return z
+
 def decal_2d(rect, tri):
 	p0, p1, p2, p3 = rect
 	pa, pb, pc = tri
 	
 	cw = dblcmp(cross(pb[0] - pa[0], pb[1] - pa[1], pc[0] - pb[0], pc[1] - pb[1]))
 	if cw == 0:	# 三角形面积为0
-		return None
+		return ()
 	if cw < 0:
 		pb, pc = pc, pb
 		tri = (pa, pb, pc)
@@ -88,13 +96,13 @@ def decal_2d(rect, tri):
 		if tp_inside:
 			tri_p_seq[j].append((0.0, tri[j], pid, None))
 			pid += 1
-	for i in xrange(4):
+	for i in range(4):
 		if rp_inside[i]:
 			rect_p_seq[i].append((0.0, rect[i], pid, None))
 			pid += 1
 	
 	if pid < 3:
-		return None
+		return ()
 
 	# 排序，并找一个点作为起始点	
 	start_pid = None
@@ -144,12 +152,112 @@ def decal_2d(rect, tri):
 		try:
 			pid = seq[i][j][2]
 		except IndexError:
-			print "fucking algorithm error"
-			return
+			print ("fucking algorithm error")
+			return ()
 		if pid == start_pid:
 			break
 	return ret
 	
+def decal(rect, tri):
+	p0, p1, p2, p3 = rect
+	pa, pb, pc = tri
+	
+	cw = dblcmp(cross(pb[0] - pa[0], pb[1] - pa[1], pc[0] - pb[0], pc[1] - pb[1]))
+	if cw == 0:	# 三角形面积为0
+		return ()
+	if cw < 0:
+		pb, pc = pc, pb
+		tri = (pa, pb, pc)
+
+	rect_e = ((p0, p1), (p1, p2), (p2, p3), (p3, p0))
+	tri_e = ((pa, pb), (pb, pc), (pc, pa))
+	
+	rect_p_seq = ([], [], [], [])
+	tri_p_seq = ([], [], [])	
+	rp_inside = [True] * 4
+	pid = 0
+	for j, te in enumerate(tri_e):
+		tp_inside = True	# 三角形的顶点是否在矩形的内部
+		for i, re in enumerate(rect_e):
+			x, y, f1, f2, tp_on_left, rp_on_left = calc_seg_intersect(
+				te[0][0], te[0][1], te[1][0], te[1][1],
+				re[0][0], re[0][1], re[1][0], re[1][1],)
+			if x is not None:
+				z = te[0][2] * (1 - f1) + te[1][2] * f1
+				tri_p_seq[j].append((f1, (x, y, z), pid, i))
+				rect_p_seq[i].append((f2, (x, y, z), pid, j))
+				pid += 1
+			if not tp_on_left:	# 只要有不在任意一条边的左侧，都out
+				tp_inside = False
+			if not rp_on_left:
+				rp_inside[i] = False
+		if tp_inside:
+			tri_p_seq[j].append((0.0, tri[j], pid, None))	# 天然有z坐标
+			pid += 1
+	for i in range(4):
+		if rp_inside[i]:
+			x, y, _ = rect[i]
+			z = calc_z_in_tri(x, y, tri[0], tri[1], tri[2])
+			rect_p_seq[i].append((0.0, (x, y, z), pid, None))
+			pid += 1
+	
+	if pid < 3:
+		return ()
+
+	# 排序，并找一个点作为起始点	
+	start_pid = None
+	seq = None
+	p_index = None
+	for i, seg_p_seq in enumerate(tri_p_seq):
+		seg_p_seq.sort()
+		if start_pid is None and seg_p_seq:
+			start_pid = seg_p_seq[0][2]
+			seq = tri_p_seq
+			p_index = (i, 0)
+	for i, seg_p_seq in enumerate(rect_p_seq):
+		seg_p_seq.sort()
+		if start_pid is None and seg_p_seq:
+			start_pid = seg_p_seq[0][2]
+			seq = rect_p_seq
+			p_index = (i, 0)		
+
+	ret = []
+	while True:
+		i, j = p_index
+		f, p, pid, rev_i = seq[i][j]
+		ret.append(p)
+		
+		# 需要切换到另外一个序列上
+		if rev_i is not None and j == len(seq[i]) - 1:
+			next_p_seq = seq[(i + 1) % len(seq)]
+			if not next_p_seq or dblcmp(next_p_seq[0][0]) != 0:
+				if seq == tri_p_seq:
+					seq = rect_p_seq
+				else:
+					seq = tri_p_seq
+				for k, (_f, _p, _pid, _rev_i) in enumerate(seq[rev_i]):
+					if pid == _pid:
+						i, j = p_index = (rev_i, k)
+						break
+		# 找下一个顶点，此时可以允许换边
+		j += 1
+		if j < len(seq[i]):
+			p_index = (i, j)
+		else:
+			i = i + 1
+			if i >= len(seq):
+				i = 0
+			j = 0
+			p_index = (i, j)
+		try:
+			pid = seq[i][j][2]
+		except IndexError:
+			print ("fucking algorithm error")
+			return ()
+		if pid == start_pid:
+			break
+	return ret
+
 def test():
 	# 1.三角形在四边形的内部
 	assert (decal_2d(
